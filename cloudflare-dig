@@ -1,0 +1,157 @@
+#!/usr/bin/env python
+import json
+import os
+import requests
+import sys
+import threading
+
+
+def recursive_call_cloudflare_api(url: str, page: int=1) -> dict:
+    """Recursively call Cloudflare API to get all paginated data. 
+    Thankfully, Cloudflare has same pagination structure across all the APIs which is needed for this program, 
+    which makes it possible to put the pagination logic into this single function.
+
+    Args:
+        url:    API URL
+
+    Returns:
+        data:   JSON response
+    """
+    cloudflare_api_token = os.environ["CLOUDFLARE_API_TOKEN"]
+    headers = { 
+        "Authorization": f"Bearer {cloudflare_api_token}",
+        "Content-Type": "application/json"
+    }
+    url = f"{url}?per_page=50&page={page}" if "?" not in url else f"{url}&per_page=50&page={page}"
+    res = requests.get(url, headers=headers)
+    if res.status_code != 200:
+        print(f"[ERROR] Get error upon invoking: {url}")
+        print(res.text)
+        sys.exit(1)
+    data = res.json()
+    if data["result_info"]["page"] < data["result_info"]["total_pages"]:
+        return data["result"] + recursive_call_cloudflare_api(url, page + 1)
+    return data["result"]
+
+
+def thread_get_record(thread_input_data: dict, thread_output_data: dict):
+    """Thread to get a record in a zone 
+
+    Args:
+        thread_input_data:  Thread input data
+        thread_output_data: Thread output data
+    """
+    domain = thread_input_data["domain"]
+    zone = thread_input_data["zone"]
+    zone_id = zone["id"]
+
+    url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records?name={domain}"
+    thread_output_data["data"] = recursive_call_cloudflare_api(url)
+
+
+def get_record(domain: str, zones: list) -> list:
+    """Get records from all the zones specified on the list
+
+    Args:
+        domain:     Domain
+        zones:      List of zones
+
+    Returns:
+        records:    List of records
+    """
+    # Get domains to be searched across all the zones specified
+    domains_to_be_searched = []
+    for zone in zones: 
+        domains_to_be_searched_for_a_zone = []
+        zone_name = zone["name"]
+
+        if domain == zone_name:
+            domains_to_be_searched_for_a_zone.append(zone_name)
+        else:
+            components = domain.replace(zone_name, "").split(".")
+            prev_val = ""
+            for i in range(len(components) - 1, -1, -1):
+                if components[i]:
+                    prefix = f"*.{prev_val}"
+                    domains_to_be_searched_for_a_zone.append(f"{prefix}{zone_name}")
+                    prefix = f"{components[i]}.{prev_val}"
+                    domains_to_be_searched_for_a_zone.append(f"{prefix}{zone_name}")
+                    prev_val = prefix
+
+        for each in domains_to_be_searched_for_a_zone:
+            domains_to_be_searched.append({
+                "domain": each,
+                "zone": zone
+            })
+
+    # Search the domains. Do it using threads in favor of time
+    threads = []
+    for each in domains_to_be_searched:
+        thread_input_data = each
+        thread_output_data = {}
+        threads.append({
+            "thread_input_data": thread_input_data,
+            "thread_output_data": thread_output_data,
+            "thread": threading.Thread(target=thread_get_record, args=(thread_input_data, thread_output_data,))
+        }) 
+    for thread in threads:
+        thread["thread"].start()
+    for thread in threads:
+        thread["thread"].join()    
+    result = []
+    for thread in threads:
+        result += thread["thread_output_data"]["data"]
+
+    # Filter the records whose type is A, AAAA, or CNAME
+    result = [ each for each in result if each["type"] in ["A", "AAAA", "CNAME"] ]
+    # If record with an exact match of the domain is found, then remove the wildcard record (if any)
+    exact_match_found = False
+    for each in result:
+        if each["name"] == domain:
+            exact_match_found = True
+            break
+    if exact_match_found:
+        result = [ each for each in result if "*" not in each["name"] ]
+    return result
+
+
+def do(domain: str, zones: list) -> list:
+    # Filter the zones which could be the candidate where the domain exists
+    # If there is no candidate, then the record does not exist in this Cloudflare account
+    filtered_zones = [ each for each in zones if domain.endswith(each["name"]) ]
+    if not filtered_zones:
+        return []
+
+    records = get_record(domain, filtered_zones)
+    # If the search result has CNAME records in it, try to resolve it if possible
+    # By possible, it means that the CNAME record is in the same Cloudflare account
+    cname_records = [ each for each in records if each["type"] == "CNAME" ]
+    if not cname_records:
+        return records
+
+    for record in cname_records:
+        domain = record["content"]
+        records += do(domain, zones)
+    return records
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print(f"Usage: ./cloudflare-dig <DOMAIN>")
+        sys.exit(1)
+    domain = sys.argv[1]    
+
+    # Get zones where user has access to
+    # Ref: https://developers.cloudflare.com/api/operations/zones-get
+    url = "https://api.cloudflare.com/client/v4/zones"
+    zones = recursive_call_cloudflare_api(url)
+    records = do(domain, zones)
+    for record in records:
+        print(json.dumps({
+            "name": record["name"],
+            "type": record["type"],
+            "content": record["content"],
+            "proxied": record["proxied"],
+            "ttl": record["ttl"],
+            "zone_name": record["zone_name"]
+        }, indent=4))
