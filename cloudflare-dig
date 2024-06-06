@@ -148,6 +148,7 @@ if __name__ == "__main__":
     records = do(domain, zones)
     for record in records:
         print(json.dumps({
+            "id": record["id"],
             "name": record["name"],
             "type": record["type"],
             "content": record["content"],
