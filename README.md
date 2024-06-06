@@ -9,7 +9,6 @@ Obviously, this utility only works if you have the access to the Cloudflare acco
 Prerequisites:
 1.  Cloudflare API token stored in an environment variable `CLOUDFLARE_API_TOKEN`
 2.  The token has permission to:
-    - User Memberships: Read
     - Zone DNS: Read
 
 How to run:
