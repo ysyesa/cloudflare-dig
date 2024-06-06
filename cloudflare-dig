@@ -154,5 +154,6 @@ if __name__ == "__main__":
             "content": record["content"],
             "proxied": record["proxied"],
             "ttl": record["ttl"],
+            "zone_id": record["zone_id"],
             "zone_name": record["zone_name"]
         }, indent=4))
