@@ -146,6 +146,10 @@ if __name__ == "__main__":
     url = "https://api.cloudflare.com/client/v4/zones"
     zones = recursive_call_cloudflare_api(url)
     records = do(domain, zones)
+    if not records:
+        print(f"Either the record doesn't exist or your token doesn't have access to it.")
+        sys.exit(1)
+
     for record in records:
         print(json.dumps({
             "id": record["id"],
